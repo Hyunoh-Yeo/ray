@@ -11,7 +11,7 @@ import argparse
 import functools
 import math
 import time
-from typing import Any, Dict, Iterator, Tuple
+from typing import Any, Dict, Iterator
 
 import numpy as np
 import pyarrow as pa
@@ -25,13 +25,19 @@ from cluster_resource_monitor import ClusterResourceMonitor
 def produce(
     _: Dict[str, np.ndarray],
     *,
-    blocks_per_input: int,
+    num_output_batches: int,
     sleep_s: float,
-    block_shape: Tuple[int, int, int],
+    num_rows_per_output_batch: int,
+    size_bytes_per_output_batch: int,
 ) -> Iterator[Dict[str, np.ndarray]]:
-    for _ in range(blocks_per_input):
+    size_bytes_per_row = size_bytes_per_output_batch // num_rows_per_output_batch
+    for _ in range(num_output_batches):
         time.sleep(sleep_s)
-        yield {"data": np.zeros(block_shape, dtype=np.uint8)}
+        yield {
+            "data": np.zeros(
+                (num_rows_per_output_batch, size_bytes_per_row), dtype=np.uint8
+            )
+        }
 
 
 def consume(batch: Dict[str, np.ndarray], *, sleep_s: float) -> Dict[str, np.ndarray]:
@@ -51,25 +57,25 @@ def parse_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> Dict[str, Any]:
-    # With 1000 inputs this takes ~30 minutes, long enough that node provisioning
-    # speed doesn't make the test flaky.
-    num_inputs = 1000
-    blocks_per_input = 4
+    # With 10,000 inputs this takes ~30 minutes, long enough that node
+    # provisioning speed doesn't make the test flaky.
+    num_inputs = 10000
+    num_output_batches = 4
     produce_sleep_s = 5
     consume_sleep_s = 1
-    block_shape = (128, 1024, 1024)
-    rows_per_block = block_shape[0]
-    consume_batch_size = 2 * rows_per_block
+    num_rows_per_output_batch = 128
+    size_bytes_per_output_batch = 128 * 1024 * 1024
+    consume_batch_size = 2 * num_rows_per_output_batch
 
     # From the compute config.
     expected_gpu_nodes = 10
     cpus_per_node = 8
 
-    # Each consumer processes 2 blocks/s. Each producer emits 0.2 blocks/s, so one
-    # consumer needs 10 producers.
-    blocks_per_consumer_batch = consume_batch_size / rows_per_block
+    # Each consumer processes 2 batches/s. Each producer emits 0.2 batches/s, so
+    # one consumer needs 10 producers.
+    producer_batches_per_consumer_batch = consume_batch_size / num_rows_per_output_batch
     producers_per_consumer = (
-        blocks_per_consumer_batch * produce_sleep_s / consume_sleep_s
+        producer_batches_per_consumer_batch * produce_sleep_s / consume_sleep_s
     )
 
     # Ten consumers need 100 producer CPUs. The GPU nodes provide 80, leaving a
@@ -85,9 +91,10 @@ def main(args: argparse.Namespace) -> Dict[str, Any]:
 
     producer = functools.partial(
         produce,
-        blocks_per_input=blocks_per_input,
+        num_output_batches=num_output_batches,
         sleep_s=produce_sleep_s,
-        block_shape=block_shape,
+        num_rows_per_output_batch=num_rows_per_output_batch,
+        size_bytes_per_output_batch=size_bytes_per_output_batch,
     )
     consumer = functools.partial(consume, sleep_s=consume_sleep_s)
 
